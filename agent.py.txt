@@ -1,0 +1,522 @@
+import os
+import base64
+import json
+from typing import Dict, Any, List
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_openai import AzureChatOpenAI
+from langchain_core.tools import BaseTool
+from langchain_core.prompts import PromptTemplate
+from pydantic import BaseModel, Field
+import fitz  # PyMuPDF
+
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4-vision")
+AZURE_OPENAI_API_VERSION = "2024-02-15-preview"
+
+
+# ============================================================================
+# PDF PREPROCESSING
+# ============================================================================
+def extract_images_from_pdf(pdf_path: str) -> List[str]:
+    """Extract images from PDF before passing to agent"""
+    output_dir = pdf_path.replace('.pdf', '_images')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    doc = fitz.open(pdf_path)
+    image_paths = []
+    
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        for img_index, img in enumerate(page.get_images(full=True)):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_path = os.path.join(output_dir, f"page{page_num+1}_img{img_index+1}.{base_image['ext']}")
+            
+            with open(image_path, "wb") as f:
+                f.write(base_image["image"])
+            image_paths.append(image_path)
+    
+    doc.close()
+    return image_paths
+
+
+# ============================================================================
+# INPUT SCHEMA
+# ============================================================================
+class ImageInput(BaseModel):
+    """Input schema for morphing detection"""
+    image_path: str = Field(description="Path to the medical banner image file to analyze")
+
+
+# ============================================================================
+# SINGLE COMPREHENSIVE TOOL
+# ============================================================================
+class MorphingDetectionTool(BaseTool):
+    """Single tool that performs comprehensive morphing analysis"""
+    
+    name: str = "detect_morphing"
+    description: str = """Use this tool to analyze a medical banner image for person/face morphing.
+    This tool performs comprehensive forensic analysis checking:
+    - Geometric alignment (proportions, perspective, positioning)
+    - Blur consistency (focus patterns, sharpness mismatches)
+    - Shadow and lighting (direction, intensity, consistency)
+    - Edge artifacts (halos, hard edges, cut-paste signs)
+    
+    Input: image_path (string) - path to the banner image
+    Returns: JSON with morphing detection results including regions and confidence scores"""
+    
+    args_schema: type[BaseModel] = ImageInput
+    
+    def _run(self, image_path: str) -> str:
+        """Execute morphing detection analysis"""
+        
+        # Encode image to base64
+        try:
+            with open(image_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode('utf-8')
+        except FileNotFoundError:
+            return json.dumps({
+                "error": f"Image file not found: {image_path}",
+                "is_morphed": None,
+                "morphed_regions": []
+            })
+        except Exception as e:
+            return json.dumps({
+                "error": f"Failed to read image: {str(e)}",
+                "is_morphed": None,
+                "morphed_regions": []
+            })
+        
+        # Initialize Azure OpenAI
+        llm = AzureChatOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_KEY,
+            deployment_name=AZURE_OPENAI_DEPLOYMENT,
+            api_version=AZURE_OPENAI_API_VERSION,
+            temperature=0
+        )
+        
+        # Comprehensive analysis prompt
+        analysis_prompt = """You are a forensic image analyst expert specializing in detecting morphed or manipulated persons in medical promotional materials.
+
+Analyze this medical camp banner systematically using the ReAct reasoning pattern:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP-BY-STEP ANALYSIS PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**STEP 1: GEOMETRIC ALIGNMENT ANALYSIS**
+Examine:
+• Face/head alignment - Are faces tilted unnaturally? Asymmetric features?
+• Body proportions - Do head-to-body ratios look natural for all persons?
+• Perspective coherence - Do all persons follow same vanishing point?
+• Positioning - Are persons positioned naturally relative to each other/background?
+• Scale consistency - Are person sizes appropriate for their distance?
+
+**STEP 2: BLUR & FOCUS CONSISTENCY CHECK**
+Examine:
+• Face vs body sharpness - Is face sharp but body blurry (or vice versa)?
+• Depth of field - Does blur follow natural camera physics?
+• Focus distribution - Are some persons sharp while others unnaturally blurred?
+• Edge blur - Suspicious blur only around person boundaries?
+• Detail levels - Similar-distance objects have similar detail?
+
+**STEP 3: SHADOW & LIGHTING ANALYSIS**
+Examine:
+• Shadow direction - Do all shadows point in same direction?
+• Shadow presence - Are shadows missing where they should exist?
+• Shadow intensity - Does darkness match light source positioning?
+• Lighting consistency - Are all persons lit from same light source(s)?
+• Highlight/shadow ratios - Do faces have consistent lighting contrast?
+• Background lighting - Does person lighting match environment?
+
+**STEP 4: EDGE ARTIFACTS & CUT-PASTE DETECTION**
+Examine:
+• Hard edges - Unnaturally sharp or straight edges around persons/hair?
+• Color fringing - Visible color halos or outlines around boundaries?
+• Background blending - Do persons blend naturally or look "pasted on"?
+• Compression artifacts - Different JPEG compression between person and background?
+• Outline inconsistencies - Selection marks, feathering errors, mask edges?
+• Pixel discontinuities - Abrupt pixel changes at person-background boundaries?
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL: OUTPUT MUST BE VALID JSON ONLY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+After systematic analysis, return ONLY valid JSON (no additional text):
+
+If MORPHING DETECTED:
+{
+  "is_morphed": true,
+  "confidence_score": "high/medium/low",
+  "morphed_regions": [
+    {
+      "location": "exact location description (e.g., 'center person face', 'right side person body')",
+      "bbox": [x1_percent, y1_percent, x2_percent, y2_percent],
+      "reason": "specific indicators: sharp edges, no shadows, blur mismatch, geometric distortion",
+      "severity": "critical/moderate/minor",
+      "confidence_score": "high/medium/low"
+    }
+  ]
+}
+
+If AUTHENTIC (NO MORPHING):
+{
+  "is_morphed": false,
+  "morphed_regions": []
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BOUNDING BOX FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+bbox: [x1_percent, y1_percent, x2_percent, y2_percent]
+- x1_percent: left edge as % of image width (0-100)
+- y1_percent: top edge as % of image height (0-100)
+- x2_percent: right edge as % of image width (0-100)
+- y2_percent: bottom edge as % of image height (0-100)
+
+Example: [30, 15, 50, 70] = box from 30% to 50% horizontally, 15% to 70% vertically
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GUIDELINES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CONFIDENCE LEVELS:
+• HIGH: Multiple clear indicators, obvious manipulation
+• MEDIUM: Several suspicious indicators, likely morphed
+• LOW: Few subtle indicators, possibly morphed
+
+SEVERITY LEVELS:
+• CRITICAL: Clear manipulation (missing shadows, hard edges, lighting conflicts)
+• MODERATE: Noticeable issues (slight blur mismatch, minor shadow issues)
+• MINOR: Subtle anomalies (compression artifacts, minimal tone differences)
+
+IMPORTANT:
+1. Return ONLY valid JSON, no markdown, no additional text
+2. Be precise with bounding box coordinates
+3. Include ALL suspicious regions found
+4. Be thorough but accurate - false positives harm trust
+5. Each morphed region should have tight bounding box around suspicious area
+
+Analyze the image now:"""
+
+        # Send request to Azure OpenAI Vision
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": analysis_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_data}",
+                            "detail": "high"
+                        }
+                    }
+                ]
+            }
+        ]
+        
+        try:
+            response = llm.invoke(messages)
+            return response.content
+        except Exception as e:
+            return json.dumps({
+                "error": f"API call failed: {str(e)}",
+                "is_morphed": None,
+                "morphed_regions": []
+            })
+
+
+# ============================================================================
+# AGENT CREATION
+# ============================================================================
+def create_morphing_agent() -> AgentExecutor:
+    """Create agent executor for morphing detection"""
+    
+    # Initialize the single comprehensive tool
+    tools = [MorphingDetectionTool()]
+    
+    # Initialize LLM for agent reasoning
+    llm = AzureChatOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_KEY,
+        deployment_name=AZURE_OPENAI_DEPLOYMENT,
+        api_version=AZURE_OPENAI_API_VERSION,
+        temperature=0
+    )
+    
+    # ReAct agent prompt template
+    react_prompt = PromptTemplate.from_template("""You are a medical banner verification agent that detects morphed/manipulated persons in promotional materials.
+
+You have access to a comprehensive morphing detection tool. Use it to analyze the banner image and provide results.
+
+TASK: Analyze the provided medical camp banner for person/face morphing and manipulation.
+
+AVAILABLE TOOLS:
+{tools}
+
+TOOL NAMES: {tool_names}
+
+INSTRUCTIONS:
+1. Use the detect_morphing tool to analyze the image
+2. The tool returns JSON with morphing detection results
+3. Return that JSON as your Final Answer without modification
+
+FORMAT:
+Question: the input question/task
+Thought: I need to use the morphing detection tool to analyze this banner
+Action: detect_morphing
+Action Input: {{"image_path": "path/to/image"}}
+Observation: [tool output - JSON result]
+Thought: I have the analysis results, I can provide the final answer
+Final Answer: [Return the JSON from tool output]
+
+Begin!
+
+Question: {input}
+
+{agent_scratchpad}""")
+    
+    # Create ReAct agent
+    agent = create_react_agent(llm, tools, react_prompt)
+    
+    # Create agent executor
+    agent_executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=True,
+        max_iterations=5,
+        return_intermediate_steps=True,
+        handle_parsing_errors=True
+    )
+    
+    return agent_executor
+
+
+# ============================================================================
+# MAIN ANALYSIS FUNCTIONS
+# ============================================================================
+def analyze_banner(file_path: str) -> Dict[str, Any]:
+    """
+    Analyze medical banner using agent executor (handles both images and PDFs)
+    
+    Args:
+        file_path: Path to the banner image file or PDF
+        
+    Returns:
+        Dictionary containing morphing detection results
+    """
+    
+    # Handle PDF by extracting images first
+    if file_path.lower().endswith('.pdf'):
+        print(f"📄 Processing PDF: {file_path}")
+        print("="*70)
+        
+        try:
+            # Extract images from PDF
+            images = extract_images_from_pdf(file_path)
+            print(f"✓ Extracted {len(images)} image(s) from PDF\n")
+            
+            # Analyze each extracted image
+            all_results = []
+            for idx, img_path in enumerate(images, 1):
+                print(f"\n[{idx}/{len(images)}] Analyzing: {os.path.basename(img_path)}")
+                result = analyze_banner(img_path)  # Recursive call with image
+                if result.get("success"):
+                    result["image_file"] = os.path.basename(img_path)
+                all_results.append(result)
+            
+            # Return aggregated results
+            morphed_count = sum(1 for r in all_results if r.get("success") and r.get("result", {}).get("is_morphed"))
+            
+            return {
+                "success": True,
+                "pdf_path": file_path,
+                "images_analyzed": len(images),
+                "morphed_images_found": morphed_count,
+                "results": all_results
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"PDF processing failed: {str(e)}",
+                "pdf_path": file_path
+            }
+    
+    # Handle single image (original logic)
+    print(f"🔍 Analyzing image: {file_path}")
+    print("="*70)
+    
+    # Create agent
+    agent_executor = create_morphing_agent()
+    
+    # Execute analysis
+    result = agent_executor.invoke({
+        "input": f"Detect person/face morphing in this medical banner: {file_path}"
+    })
+    
+    # Parse JSON from agent output
+    try:
+        output_text = result["output"]
+        
+        # Clean output if wrapped in markdown
+        if "```json" in output_text:
+            output_text = output_text.split("```json")[1].split("```")[0]
+        elif "```" in output_text:
+            output_text = output_text.split("```")[1].split("```")[0]
+        
+        # Extract JSON
+        if "{" in output_text:
+            json_start = output_text.find("{")
+            json_end = output_text.rfind("}") + 1
+            json_str = output_text[json_start:json_end]
+            parsed_result = json.loads(json_str)
+            
+            return {
+                "success": True,
+                "result": parsed_result,
+                "reasoning_steps": result.get("intermediate_steps", [])
+            }
+        else:
+            return {
+                "success": False,
+                "error": "No JSON found in output",
+                "raw_output": output_text
+            }
+            
+    except json.JSONDecodeError as e:
+        return {
+            "success": False,
+            "error": f"JSON parsing failed: {str(e)}",
+            "raw_output": result.get("output", "")
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Analysis failed: {str(e)}",
+            "raw_output": result.get("output", "")
+        }
+
+
+def print_results(analysis_result: Dict[str, Any]):
+    """Pretty print analysis results"""
+    
+    print("\n" + "="*70)
+    print("📊 MORPHING DETECTION RESULTS")
+    print("="*70)
+    
+    if not analysis_result.get("success"):
+        print("❌ ERROR:", analysis_result.get("error"))
+        print("\nRaw output:", analysis_result.get("raw_output"))
+        return
+    
+    # Handle PDF results (multiple images)
+    if "pdf_path" in analysis_result:
+        print(f"📄 PDF: {analysis_result.get('pdf_path')}")
+        print(f"🖼️  Images analyzed: {analysis_result.get('images_analyzed', 0)}")
+        print(f"⚠️  Morphed images found: {analysis_result.get('morphed_images_found', 0)}")
+        print("\n" + "-"*70)
+        
+        for idx, img_result in enumerate(analysis_result.get('results', []), 1):
+            print(f"\n[Image {idx}] {img_result.get('image_file', 'Unknown')}")
+            if img_result.get("success") and img_result.get("result"):
+                result = img_result["result"]
+                if result.get("is_morphed"):
+                    print(f"  ⚠️  MORPHED - Confidence: {result.get('confidence_score', 'unknown')}")
+                    print(f"  📍 Regions: {len(result.get('morphed_regions', []))}")
+                else:
+                    print(f"  ✅ AUTHENTIC")
+            else:
+                print(f"  ❌ ERROR: {img_result.get('error', 'Unknown error')}")
+        
+        print("\n" + "="*70)
+        return
+    
+    # Handle single image result
+    result = analysis_result["result"]
+    
+    if result.get("is_morphed"):
+        print("⚠️  VERDICT: MORPHED/MANIPULATED")
+        print(f"🎯 Confidence: {result.get('confidence_score', 'unknown').upper()}")
+        print(f"📍 Regions detected: {len(result.get('morphed_regions', []))}")
+        
+        print("\n" + "-"*70)
+        print("SUSPICIOUS REGIONS:")
+        print("-"*70)
+        
+        for idx, region in enumerate(result.get('morphed_regions', []), 1):
+            print(f"\n[{idx}] Location: {region.get('location')}")
+            print(f"    Bounding Box: {region.get('bbox')}")
+            print(f"    Severity: {region.get('severity', 'unknown').upper()}")
+            print(f"    Confidence: {region.get('confidence_score', 'unknown')}")
+            print(f"    Reason: {region.get('reason')}")
+    else:
+        print("✅ VERDICT: AUTHENTIC")
+        print("No morphing or manipulation detected")
+    
+    print("\n" + "="*70)
+
+
+# ============================================================================
+# USAGE EXAMPLE
+# ============================================================================
+if __name__ == "__main__":
+    import sys
+    
+    # Check if image/PDF path provided
+    if len(sys.argv) > 1:
+        banner_path = sys.argv[1]
+    else:
+        # Default example path
+        banner_path = "medical_camp_banner.jpg"
+        print(f"ℹ️  No file provided, using default: {banner_path}")
+        print(f"   Usage: python agent.py <path_to_image_or_pdf>")
+        print()
+    
+    # Check environment variables
+    if not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_KEY:
+        print("❌ ERROR: Azure OpenAI credentials not found!")
+        print("\nPlease set environment variables:")
+        print("  - AZURE_OPENAI_ENDPOINT")
+        print("  - AZURE_OPENAI_KEY")
+        print("  - AZURE_OPENAI_DEPLOYMENT (optional, defaults to 'gpt-4-vision')")
+        sys.exit(1)
+    
+    # Check if file exists
+    if not os.path.exists(banner_path):
+        print(f"❌ ERROR: File not found: {banner_path}")
+        sys.exit(1)
+    
+    # Run analysis
+    try:
+        analysis_result = analyze_banner(banner_path)
+        print_results(analysis_result)
+        
+        # Optionally save results to JSON file
+        output_file = banner_path.replace(".", "_analysis.") + ".json"
+        if analysis_result.get("success"):
+            with open(output_file, "w") as f:
+                json.dump(analysis_result["result"], f, indent=2)
+            print(f"\n💾 Results saved to: {output_file}")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Analysis interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ FATAL ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
