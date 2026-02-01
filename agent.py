@@ -665,8 +665,15 @@ if __name__ == "__main__":
             with open(output_file, "w") as f:
                 # Handle both single image and PDF results
                 if "pdf_path" in analysis_result:
-                    # PDF result - save entire structure
-                    json.dump(analysis_result, f, indent=2)
+                    # PDF result - save entire structure (excluding non-serializable fields)
+                    save_data = {k: v for k, v in analysis_result.items() if k != "reasoning_steps"}
+                    # Also clean reasoning_steps from nested results
+                    if "results" in save_data:
+                        save_data["results"] = [
+                            {k: v for k, v in r.items() if k != "reasoning_steps"}
+                            for r in save_data["results"]
+                        ]
+                    json.dump(save_data, f, indent=2)
                 else:
                     # Single image result - save just the result
                     json.dump(analysis_result["result"], f, indent=2)
