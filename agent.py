@@ -18,9 +18,19 @@ import fitz  # PyMuPDF
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
+# Support multiple environment variable naming conventions for compatibility
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4-vision")
+AZURE_OPENAI_KEY = (
+    os.getenv("AZURE_OPENAI_KEY") or 
+    os.getenv("AZURE_OPENAI_API_KEY") or 
+    ""
+)
+AZURE_OPENAI_DEPLOYMENT = (
+    os.getenv("AZURE_OPENAI_DEPLOYMENT") or 
+    os.getenv("AZURE_CHAT_COMPLETION_MODEL") or 
+    os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") or 
+    "gpt-4-vision"
+)
 AZURE_OPENAI_API_VERSION = "2024-02-15-preview"
 
 
@@ -167,6 +177,25 @@ All persons have consistent lighting from same source.
 No hard edges or halos, natural photo.
 → Normal photo quality variation, don't flag"
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LEGITIMATE DESIGN ELEMENTS (DO NOT FLAG AS MORPHING)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These are NORMAL design choices and should NOT be flagged:
+
+✓ **Watermarks**: Logos, copyright text, brand marks, social media handles
+✓ **Artistic Filters**: Instagram-style filters applied uniformly (sepia, vintage, B&W)
+✓ **Image-wide Effects**: Vignette, color grading, saturation adjustments, contrast changes
+✓ **Design Overlays**: Borders, frames, decorative elements, graphic design layers
+✓ **Blur Effects**: Artistic background blur, bokeh effects, depth-of-field (if consistent)
+✓ **Professional Edits**: Brightness/contrast adjustments, color correction applied to entire image
+
+**KEY DISTINCTION:**
+• LEGITIMATE = Effects applied uniformly/artistically to entire image as design choice
+• MORPHING = Selective manipulation to deceive (wrong geometry, cut-paste persons, fake text)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Analyze this medical camp banner systematically:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -195,6 +224,8 @@ Examine text elements and classify issues by severity:
 • Natural text rendering on legitimate printed banner
 • Slight shadow softness differences
 • Minor camera angle effects on text appearance
+• Watermarks, logos, copyright text
+• Artistic filters or color grading applied to entire image
 
 **Analysis Approach:**
 1. Identify ANY text issues present
@@ -223,6 +254,8 @@ Examine text elements and classify issues by severity:
 • Natural depth of field effects (background blur)
 • Normal photo quality variations between persons
 • Slight focus differences across image plane
+• Artistic blur effects or bokeh applied uniformly
+• Image-wide filters (sepia, vintage, color grading)
 
 **STEP 3: SHADOW & LIGHTING CONSISTENCY**
 
@@ -241,6 +274,7 @@ Examine text elements and classify issues by severity:
 • Natural shadow softness variations
 • Slight lighting differences from camera angle
 • Normal fill light effects
+• Vignette or lighting effects from artistic filters
 
 **STEP 4: EDGE QUALITY & INTEGRATION**
 
@@ -259,6 +293,8 @@ Examine text elements and classify issues by severity:
 • Natural edge sharpness from focus
 • JPEG compression artifacts
 • Normal photo quality characteristics
+• Design overlays (borders, frames, watermarks)
+• Uniform artistic effects across entire image
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL: OUTPUT MUST BE VALID JSON ONLY
@@ -274,15 +310,19 @@ If MORPHING DETECTED:
     {
       "location": "exact location description (e.g., 'center banner text', 'left person face')",
       "bbox": [x1_percent, y1_percent, x2_percent, y2_percent],
-      "reason": "EVIDENCE: [List 2+ specific CRITICAL/MODERATE indicators, e.g., 'CRITICAL: text perspective completely flat on curved surface, MODERATE: text shadow direction differs from other shadows']",
-      "severity": "critical/moderate",
-      "confidence_score": "high/medium"
+      "reason": "EVIDENCE: [List specific CRITICAL/MODERATE indicators found, e.g., 'CRITICAL: text perspective completely flat on curved surface, MODERATE: text shadow direction differs']",
+      "severity": "critical/moderate/minor",
+      "confidence_score": "high/medium/low"
     }
   ]
 }
 
-IMPORTANT: "reason" field MUST cite specific CRITICAL and MODERATE indicators found.
-Do NOT use "minor" severity - only report CRITICAL or MODERATE issues.
+CONFIDENCE MAPPING TO OUTPUT:
+• HIGH confidence → severity: "critical", confidence_score: "high"
+• MEDIUM confidence → severity: "moderate", confidence_score: "medium"
+• LOW confidence → severity: "minor", confidence_score: "low"
+
+IMPORTANT: "reason" field MUST cite specific indicators found and their classification.
 
 If AUTHENTIC (NO MORPHING):
 {
@@ -329,13 +369,14 @@ DECISION LOGIC (EVIDENCE-BASED)
 3. Apply decision rules:
 
 **FLAG AS MORPHED** if:
-✓ 2+ CRITICAL indicators found → confidence: "high"
-✓ 1 CRITICAL + 2+ MODERATE indicators → confidence: "medium"  
-✓ 1 CRITICAL + 1 MODERATE (if very obvious) → confidence: "medium"
+✓ 3+ CRITICAL indicators → confidence: "high"
+✓ 2 CRITICAL indicators OR 1 CRITICAL + 2+ MODERATE → confidence: "medium"  
+✓ 1 CRITICAL + 1 MODERATE → confidence: "low"
+✓ 3+ MODERATE indicators (without CRITICAL) → confidence: "low"
 
 **MARK AS AUTHENTIC** if:
 ✓ Only MINOR issues found (normal artifacts)
-✓ Only 1 MODERATE indicator without CRITICAL support
+✓ Only 1-2 MODERATE indicators without CRITICAL support
 ✓ No significant evidence of manipulation
 
 **REASONING REQUIRED:**
@@ -344,14 +385,14 @@ DECISION LOGIC (EVIDENCE-BASED)
 - Show your evidence count before deciding
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CONFIDENCE LEVELS
+CONFIDENCE LEVELS - ALL LEVELS REPORTED
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-• HIGH: 3+ CRITICAL indicators OR 2 CRITICAL + strong supporting evidence
-• MEDIUM: 2 CRITICAL indicators OR 1 CRITICAL + 2+ MODERATE
-• LOW: 1 CRITICAL + 1 MODERATE OR questionable indicators
+• **HIGH**: 3+ CRITICAL indicators - "ALERT: Very likely morphed"
+• **MEDIUM**: 2 CRITICAL OR 1 CRITICAL + 2+ MODERATE - "WARNING: Probably morphed"
+• **LOW**: 1 CRITICAL + 1 MODERATE OR 3+ MODERATE - "FYI: Possibly morphed, review recommended"
 
-Only flag as morphed if confidence is at least MEDIUM.
+Report ALL confidence levels. Clearly distinguish between high-certainty alerts and low-certainty flags.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT REQUIREMENTS
@@ -359,9 +400,10 @@ OUTPUT REQUIREMENTS
 
 1. Return ONLY valid JSON, no markdown, no additional text
 2. Be precise with bounding box coordinates
-3. Include ONLY regions with CRITICAL or MODERATE indicators
-4. Each morphed region must cite specific evidence
-5. Ignore MINOR issues (normal artifacts) - don't report them
+3. Include ALL morphed regions detected (HIGH/MEDIUM/LOW confidence)
+4. Each morphed region must cite specific evidence and classification
+5. For LOW confidence, clearly indicate uncertainty in severity ("minor")
+6. Do NOT report normal artifacts (watermarks, filters, JPEG compression) as morphing
 
 Analyze the image now:"""
 
